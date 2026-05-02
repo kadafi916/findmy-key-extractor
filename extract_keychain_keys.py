@@ -1,14 +1,11 @@
 """
-extract_keychain_keys.py — lldb script to extract Find My keys via breakpoints.
+extract_keychain_keys.py — lldb script to extract Find My keychain keys.
 
-Attaches to a target process and captures:
-  - sqlite3_key_v2 hits → saves keys identified by sqlite3_db_filename
-  - SecItemCopyMatching hits → saves all successful results with index
-
-Works with findmylocateagent (LocalStorage.db key) and FindMy.app (FMF/FMIP keys).
+Attaches to FindMy.app and captures FMF/FMIP keychain items via
+SecItemCopyMatching breakpoints.
 
 Usage:
-  sudo lldb --wait-for -n findmylocateagent \
+  sudo lldb --wait-for -n FindMy \
     -o "command script import extract_keychain_keys.py" \
     -o "c" -o "quit"
 
@@ -21,9 +18,7 @@ from pathlib import Path
 
 OUT_DIR = Path(__file__).resolve().parent / "keys"
 
-_bp_key_v2 = None
 _bp_secitem = None
-_sqlite_keys = {}   # db_name -> True (already captured)
 _secitem_count = 0
 _secitem_captured = 0
 _secitem_resolved = 0
@@ -115,59 +110,6 @@ def _finish(process):
     _done = True
     _log("")
     process.Kill()
-
-
-# ── sqlite3_key_v2 — captures SQLite encryption keys ─────────────────────
-
-def _on_sqlite3_key_v2(frame, bp_loc, extra_args, internal_dict):
-    if _done:
-        return False
-
-    process = frame.GetThread().GetProcess()
-    db_ptr  = _arg(frame, 0)
-    key_ptr = _arg(frame, 2)
-    key_len = _arg(frame, 3)
-    _log(f"  🔔  sqlite3_key_v2 hit: db=0x{db_ptr:x} key=0x{key_ptr:x} len={key_len}")
-
-    if key_len != 32:
-        return False
-
-    # Identify the database — disable BP to prevent recursion
-    if _bp_key_v2 and _bp_key_v2.IsValid():
-        _bp_key_v2.SetEnabled(False)
-
-    opts = lldb.SBExpressionOptions()
-    opts.SetTimeoutInMicroSeconds(5_000_000)
-    opts.SetTryAllThreads(False)
-    r = frame.EvaluateExpression(
-        f'(char*)sqlite3_db_filename((void*){db_ptr}, "main")', opts)
-
-    if _bp_key_v2 and _bp_key_v2.IsValid():
-        _bp_key_v2.SetEnabled(True)
-
-    if r.GetError().Fail():
-        return False
-
-    path_ptr = r.GetValueAsUnsigned()
-    db_path = _read_cstring(process, path_ptr) if path_ptr else None
-    if not db_path:
-        return False
-
-    # Extract DB name from path
-    db_name = db_path.rsplit("/", 1)[-1].replace(".db", "")
-    if db_name in _sqlite_keys:
-        return False
-
-    key_data = _read_mem(process, key_ptr, 32)
-    if not key_data:
-        return False
-
-    filename = f"{db_name}.key"
-    with open(OUT_DIR / filename, "wb") as f:
-        f.write(key_data)
-    _sqlite_keys[db_name] = True
-    _log(f"  ✅  {db_name}.key (32 bytes)")
-    return False
 
 
 # ── SecItemCopyMatching — capture all successful results ──────────────────
@@ -444,7 +386,7 @@ def _save_cfdata(frame, process, idx, data_ptr, opts=None, name=None):
 # ── Module init ───────────────────────────────────────────────────────────
 
 def __lldb_init_module(debugger, internal_dict):
-    global _bp_key_v2, _bp_secitem
+    global _bp_secitem
 
     target = debugger.GetSelectedTarget()
     if not target or not target.IsValid():
@@ -454,10 +396,7 @@ def __lldb_init_module(debugger, internal_dict):
     triple = target.GetTriple() or "(unknown)"
     _log(f"  📍  target triple: {triple}")
 
-    _bp_key_v2 = target.BreakpointCreateByName("sqlite3_key_v2")
-    _bp_key_v2.SetScriptCallbackFunction("extract_keychain_keys._on_sqlite3_key_v2")
-
     _bp_secitem = target.BreakpointCreateByName("SecItemCopyMatching")
     _bp_secitem.SetScriptCallbackFunction("extract_keychain_keys._on_secitem_entry")
 
-    _log(f"  ⏳  Waiting for key derivation... (sqlite3_key_v2: {_bp_key_v2.GetNumLocations()} locs, SecItemCopyMatching: {_bp_secitem.GetNumLocations()} locs)")
+    _log(f"  ⏳  Waiting for keychain reads... (SecItemCopyMatching: {_bp_secitem.GetNumLocations()} locs)")
