@@ -17,7 +17,7 @@ Used by [FindMySyncPlus](https://github.com/manonstreet/FindMySyncPlus) to decry
 
 ## Prerequisites
 
-- macOS (Apple Silicon **and** Intel x86_64; the lldb scripts dispatch on `target.GetTriple()`)
+- macOS (Apple Silicon and Intel x86_64)
 - Xcode Command Line Tools — `xcode-select --install` (provides lldb)
 - Python 3 + pip
 - Find My app installed and signed into iCloud
@@ -63,7 +63,7 @@ pip3 install -r requirements.txt   # one-time: pycryptodome + cryptography
 ./extract.sh
 ```
 
-No interaction needed. The script kills Find My, launches two parallel lldb sessions, reopens Find My to trigger key loading, captures the keys, and verifies each one:
+No interaction needed. The script launches two parallel lldb sessions, restarts the Find My processes to trigger key loading, captures the keys, and verifies each one:
 
 ```
   🔑  Find My Key Extractor
@@ -159,7 +159,7 @@ extract.sh
   │           ├── svce = "FMIPDataManager"  →  FMIPDataManager.bplist
   │           └── svce = "FMFDataManager"   →  FMFDataManager.bplist
   │
-  ├── open "Find My.app"                   (triggers both processes)
+  ├── open FindMy.app                      (triggers both processes)
   └── wait + verify
 ```
 
@@ -188,8 +188,8 @@ It then calls `sqlite3_db_filename(db, "main")` to identify which database this 
 
 `FindMy.app` reads keychain items via `SecItemCopyMatching(query, &result)`. The lldb script uses a two-phase approach:
 
-1. **Entry breakpoint**: Records the result pointer (arg 1: `x1` on ARM64, `rsi` on x86_64) and return address (`lr` on ARM64 with PAC bits stripped, `[rsp]` on x86_64)
-2. **Return breakpoint**: One-shot breakpoint at the return address. Checks return value == 0 (success via `x0` / `rax`), then reads the result `NSDictionary`
+1. **Entry breakpoint**: Records the result pointer (arg 1) and return address (stripped of PAC bits on ARM64)
+2. **Return breakpoint**: One-shot breakpoint at the return address. Checks return value == 0 (success), then reads the result `NSDictionary`
 
 From the dictionary, it extracts:
 - `svce` — service name (e.g., `"FMIPDataManager"`) → used as output filename
