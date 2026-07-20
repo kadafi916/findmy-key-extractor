@@ -55,16 +55,14 @@ sudo lldb --wait-for -n findmylocateagent \
     -o "settings set frame-format ''" \
     -o "settings set auto-confirm true" \
     -o "command script import $SCRIPT_DIR/extract_db_key.py" \
-    -o "c" \
-    -o "quit" > "$LOG1" 2>&1 &
+    -o "process continue" > "$LOG1" 2>&1 &
 PID1=$!
 
 sudo lldb --wait-for -n FindMy \
     -o "settings set frame-format ''" \
     -o "settings set auto-confirm true" \
     -o "command script import $SCRIPT_DIR/extract_keychain_keys.py" \
-    -o "c" \
-    -o "quit" > "$LOG2" 2>&1 &
+    -o "process continue" > "$LOG2" 2>&1 &
 PID2=$!
 
 # ── Give the lldb waiters a moment to install themselves ──────────────────
@@ -80,9 +78,34 @@ sudo launchctl kickstart -k "gui/$USER_UID/com.apple.findmy.findmylocateagent" 2
 sleep 1
 open /System/Applications/FindMy.app
 
-# ── Wait for both lldb sessions to finish ─────────────────────────────────
+# ── Wait up to 45s for keys (scripts kill targets when done) ──────────────
+for _ in $(seq 1 45); do
+    got=0
+    if [ -f "$KEYS_DIR/LocalStorage.key" ] || [ -f "$KEYS_DIR/LocalStorage.key.candidate" ]; then
+        got=$((got+1))
+    fi
+    [ -f "$KEYS_DIR/FMFDataManager.bplist" ] && got=$((got+1))
+    [ -f "$KEYS_DIR/FMIPDataManager.bplist" ] && got=$((got+1))
+    if [ "$got" -ge 3 ]; then
+        break
+    fi
+    # Also done if both lldb sessions exited
+    if ! kill -0 "$PID1" 2>/dev/null && ! kill -0 "$PID2" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+sudo kill -9 "$PID1" "$PID2" 2>/dev/null || true
 wait "$PID1" 2>/dev/null || true
 wait "$PID2" 2>/dev/null || true
+
+# Promote verified candidate if needed
+if [ ! -f "$KEYS_DIR/LocalStorage.key" ] && [ -f "$KEYS_DIR/LocalStorage.key.candidate" ]; then
+    if python3 "$SCRIPT_DIR/verify_key.py" "$KEYS_DIR/LocalStorage.key.candidate" >/dev/null 2>&1; then
+        mv "$KEYS_DIR/LocalStorage.key.candidate" "$KEYS_DIR/LocalStorage.key"
+    fi
+fi
 
 # ── Kill Find My, chown captured files ────────────────────────────────────
 pkill -9 FindMy 2>/dev/null || true
