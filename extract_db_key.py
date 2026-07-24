@@ -95,22 +95,28 @@ def on_sqlite3_key_v2(frame, bp_loc, extra_args, internal_dict):
         _log("  ❌  Failed to read key from memory")
         return False
 
-    # Prefer LocalStorage; if path lookup fails, still save a candidate for verify.
+    # Prefer LocalStorage; if path lookup fails, retain the first candidate for
+    # verification but keep listening in case a confirmed LocalStorage hit
+    # arrives later.
     if db_path and "LocalStorage" in db_path:
         out = KEY_FILE
     elif not db_path:
         out = OUT_DIR / "LocalStorage.key.candidate"
+        if out.exists():
+            _log("  ⏭️  path lookup failed — candidate already saved")
+            return False
         _log("  ⚠️  path lookup failed — saving candidate for verification")
     else:
-        _log(f"  ⏭️  skipping non-LocalStorage db")
+        _log("  ⏭️  skipping non-LocalStorage db")
         return False
 
     with open(out, "wb") as f:
         f.write(key_data)
 
-    _done = True
     _log(f"  ✅  Captured key → {out.name}")
-    process.Kill()
+    if out == KEY_FILE:
+        _done = True
+        process.Kill()
     return False
 
 

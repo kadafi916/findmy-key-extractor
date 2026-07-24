@@ -48,6 +48,7 @@ sleep 0.5
 # ── Prepare output directory ─────────────────────────────────────────────
 mkdir -p "$KEYS_DIR"
 rm -f "$KEYS_DIR"/LocalStorage.key
+rm -f "$KEYS_DIR"/LocalStorage.key.candidate
 rm -f "$KEYS_DIR"/*.bplist
 
 # ── Launch both lldb sessions in parallel — they enter --wait-for state ───
