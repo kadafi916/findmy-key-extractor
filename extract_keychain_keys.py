@@ -114,15 +114,42 @@ def _finish(process):
 
 # ── SecItemCopyMatching — capture all successful results ──────────────────
 
+def _query_service_name(frame, query_ptr):
+    """Read svce from the SecItemCopyMatching query dict (arg0)."""
+    if not query_ptr:
+        return None
+    opts = lldb.SBExpressionOptions()
+    opts.SetTimeoutInMicroSeconds(2_000_000)
+    opts.SetTryAllThreads(False)
+    opts.SetLanguage(lldb.eLanguageTypeObjC)
+    process = frame.GetThread().GetProcess()
+    query_ptr = _strip_pac(frame, query_ptr)
+    r = frame.EvaluateExpression(
+        f'(id)[(NSDictionary *){query_ptr} objectForKey:@"svce"]', opts)
+    if r.GetError().Fail():
+        return None
+    attr_ptr = _strip_pac(frame, r.GetValueAsUnsigned())
+    if not attr_ptr:
+        return None
+    return _read_nsstring(frame, process, attr_ptr, opts)
+
+
 def _on_secitem_entry(frame, bp_loc, extra_args, internal_dict):
     global _secitem_count
     if _done:
         return False
 
     try:
+        query_ptr = _arg(frame, 0)
         result_out_ptr = _arg(frame, 1)
+        service = _query_service_name(frame, query_ptr)
+
+        # Only track the two Find My keychain services
+        if service not in ("FMIPDataManager", "FMFDataManager"):
+            return False
+
         lr_raw = _entry_return_address(frame)
-        _log(f"  🔔  SecItemCopyMatching hit: result_out=0x{result_out_ptr:x} retaddr=0x{lr_raw:x}")
+        _log(f"  🔔  SecItemCopyMatching [{service}]: result_out=0x{result_out_ptr:x} retaddr=0x{lr_raw:x}")
         lr = _strip_pac(frame, lr_raw)
 
         if not result_out_ptr or not lr:
@@ -141,6 +168,7 @@ def _on_secitem_entry(frame, bp_loc, extra_args, internal_dict):
         _pending_returns[lr].append({
             "result_out_ptr": result_out_ptr,
             "index": idx,
+            "service": service,
         })
     except Exception as e:
         _log(f"  ⚠️  entry handler exception: {e}")
