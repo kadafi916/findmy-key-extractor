@@ -22,6 +22,12 @@ KEYS_DIR="$SCRIPT_DIR/keys"
 LOG1=$(mktemp /tmp/lldb_locateagent.XXXXXX)
 LOG2=$(mktemp /tmp/lldb_findmy.XXXXXX)
 
+# FindMy.app is App-Sandboxed, so extract_keychain_keys.py can't write the
+# FMF/FMIP bplists directly into $KEYS_DIR from inside it — it writes them
+# to the app's own sandbox-writable container tmp dir instead, and we copy
+# them out from here as the normal (unsandboxed) user below.
+FINDMY_TMP_DIR="$HOME/Library/Containers/com.apple.findmy/Data/tmp"
+
 cleanup() {
     rm -f "$LOG1" "$LOG2"
 }
@@ -50,6 +56,7 @@ mkdir -p "$KEYS_DIR"
 rm -f "$KEYS_DIR"/LocalStorage.key
 rm -f "$KEYS_DIR"/LocalStorage.key.candidate
 rm -f "$KEYS_DIR"/*.bplist
+rm -f "$FINDMY_TMP_DIR"/*.bplist 2>/dev/null || true
 
 # ── Launch both lldb sessions in parallel — they enter --wait-for state ───
 sudo lldb --wait-for -n findmylocateagent \
@@ -81,6 +88,17 @@ open /System/Applications/FindMy.app
 
 # ── Wait up to 45s for keys (scripts kill targets when done) ──────────────
 for _ in $(seq 1 45); do
+    # Copy any FMF/FMIP bplists out of FindMy's sandbox container as soon
+    # as they show up (extract_keychain_keys.py can't write $KEYS_DIR
+    # directly from inside the sandboxed process).
+    for NAME in FMFDataManager FMIPDataManager; do
+        SRC="$FINDMY_TMP_DIR/$NAME.bplist"
+        DST="$KEYS_DIR/$NAME.bplist"
+        if [ -f "$SRC" ] && [ ! -f "$DST" ]; then
+            cp "$SRC" "$DST" 2>/dev/null || true
+        fi
+    done
+
     got=0
     if [ -f "$KEYS_DIR/LocalStorage.key" ] || [ -f "$KEYS_DIR/LocalStorage.key.candidate" ]; then
         got=$((got+1))
@@ -100,6 +118,16 @@ done
 sudo kill -9 "$PID1" "$PID2" 2>/dev/null || true
 wait "$PID1" 2>/dev/null || true
 wait "$PID2" 2>/dev/null || true
+
+# One last copy pass in case a bplist landed in the sandbox tmp dir right
+# as the loop above exited.
+for NAME in FMFDataManager FMIPDataManager; do
+    SRC="$FINDMY_TMP_DIR/$NAME.bplist"
+    DST="$KEYS_DIR/$NAME.bplist"
+    if [ -f "$SRC" ] && [ ! -f "$DST" ]; then
+        cp "$SRC" "$DST" 2>/dev/null || true
+    fi
+done
 
 # Promote verified candidate if needed
 if [ ! -f "$KEYS_DIR/LocalStorage.key" ] && [ -f "$KEYS_DIR/LocalStorage.key.candidate" ]; then
