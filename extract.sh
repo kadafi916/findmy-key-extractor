@@ -207,12 +207,28 @@ if pgrep -qx FindMySyncPlus 2>/dev/null; then
     exit 1
 fi
 
-# ── Prime sudo (before banner so password prompt isn't buried) ────────────
-sudo -v
-
+# ── Prime sudo ────────────────────────────────────────────────────────────
+# Say what the password is for before asking for it. This script has just asked
+# the user to disable SIP and AMFI and is about to attach a debugger to a system
+# app and read keychain material — a bare "Password:" here is the kind of prompt
+# a careful person should refuse.
 echo ""
 echo "  🔑  Find My Key Extractor"
 echo "  ─────────────────────────"
+echo ""
+if ! sudo -n true 2>/dev/null; then
+    echo "  Administrator access is required. macOS will prompt for your login"
+    echo "  password next — that prompt comes from macOS, not from this script,"
+    echo "  and the password is never stored or sent anywhere."
+    echo ""
+    echo "  It is used for:"
+    echo "    • lldb          attach to the Find My app to read its keys"
+    echo "    • pkill         restart Find My so it re-reads them"
+    echo "    • chown         make the captured key files readable by you"
+    echo ""
+fi
+sudo -v
+
 echo ""
 echo "  ⏳  Waiting for Find My to read its keys (up to ${WAIT_SECONDS}s)..."
 echo ""
