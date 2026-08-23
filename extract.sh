@@ -162,6 +162,35 @@ fi
 # FMS+ launches and kills the Find My app on a timer to force a cache refresh
 # (autoLaunchKillFindMy). This script attaches to and kills the same process, so
 # the two fight: lldb sessions die mid-capture and keys go missing at random.
+# ── SIP / AMFI ────────────────────────────────────────────────────────────
+# Without these, lldb cannot attach and every key times out. That produced the
+# worst failure in the tool: three minutes of waiting and then "not captured",
+# with nothing saying why. Check first and fail in a second instead. The same
+# conditions are reported by diagnose.sh.
+SIP_AMFI_BLOCKED=""
+if csrutil status 2>/dev/null | grep -qiE "Debugging Restrictions: enabled|status: enabled"; then
+    SIP_AMFI_BLOCKED="  ❌  SIP debugging restrictions are still enabled.
+      A full 'csrutil disable' is required — see README Step 1."
+fi
+# Accept every form in the wild: =1, =0x1, and OCLP's amfi=0x80.
+if ! sysctl -n kern.bootargs 2>/dev/null | grep -qE "amfi_get_out_of_my_way=(1|0x1)|amfi=0x80"; then
+    SIP_AMFI_BLOCKED="${SIP_AMFI_BLOCKED:+$SIP_AMFI_BLOCKED
+
+}  ❌  AMFI is not disabled.
+      Add amfi_get_out_of_my_way=1 to boot-args and reboot — see README Step 1.
+      On OpenCore/OCLP machines the 'Disable AMFI' checkbox may not emit a
+      boot-arg; set it with sudo nvram or via the Advanced tab."
+fi
+if [ -n "$SIP_AMFI_BLOCKED" ]; then
+    echo ""
+    echo "$SIP_AMFI_BLOCKED"
+    echo ""
+    echo "      Current boot-args: $(sysctl -n kern.bootargs 2>/dev/null || echo '(none)')"
+    echo "      Run ./diagnose.sh for a full report."
+    echo ""
+    exit 1
+fi
+
 # The resulting failures look exactly like a bug in here, so stop rather than
 # produce a misleading result.
 if pgrep -qx FindMySyncPlus 2>/dev/null; then
@@ -583,6 +612,12 @@ for NAME in FMFDataManager FMIPDataManager; do
         FAIL=1
     fi
 done
+
+if [ "${FAIL:-0}" = "1" ]; then
+    echo ""
+    echo "      Run ./diagnose.sh — it reports the environment and names the"
+    echo "      likely blocker. Attach its output to any issue you open."
+fi
 
 # ── Verification ──────────────────────────────────────────────────────────
 echo ""
