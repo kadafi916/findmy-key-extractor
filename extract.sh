@@ -95,7 +95,7 @@ WAIT_SECONDS="${FINDMY_WAIT_SECONDS:-180}"
 ELAPSED=0
 # How many times to reattach if the locateagent session dies without the key.
 LOCATE_RETRIES=2
-# EXPERIMENT: how many times to relaunch Find My when it never asks for a key,
+# How many times to relaunch Find My when it never asks for a key,
 # and how long to wait after the first keychain read for the second one.
 FINDMY_RELAUNCHES=3
 # Proportional to the wait, not a fixed number of seconds. 10s was derived on an
@@ -311,7 +311,7 @@ arm_locateagent() {
 : > "$LOG1"
 arm_locateagent
 
-# EXPERIMENT: the FindMy side is armed through a function so the app can be
+# The FindMy side is armed through a function so the app can be
 # relaunched mid-run. Measured on an M4 Max over 40 runs, the dominant failure
 # is not a capture that goes wrong — it is Find My never asking the keychain for
 # a key at all: 6 runs in 20 skipped one or both reads, interspersed with clean
@@ -472,7 +472,7 @@ for _ in $(seq 1 "$WAIT_SECONDS"); do
         echo "      both keychain keys — see ./logs/lldb_findmy.log"
     fi
 
-    # EXPERIMENT: relaunch Find My when a key was never requested.
+    # Relaunch Find My when a key was never requested.
     #
     # The trigger is anchored to the first read actually happening, not to the
     # clock, because how long Find My takes to get there is exactly what varies
