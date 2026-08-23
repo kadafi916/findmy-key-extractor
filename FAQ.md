@@ -17,15 +17,25 @@ them is to attach a debugger — which SIP exists to prevent. Specifically you n
 ### `csrutil disable` says it worked, but `csrutil status` still shows restrictions
 
 You're probably on **OpenCore** — an OpenCore Legacy Patcher Mac, or a VM booted
-via OpenCore. OpenCore rewrites `csr-active-config` from its own `config.plist` on
+via OpenCore. OpenCore writes `csr-active-config` from its own `config.plist` on
 every boot, so a change made in Recovery is silently reverted.
 
-Change it in OpenCore instead:
+Set it in OpenCore instead:
 
 - **OCLP:** open OpenCore-Patcher → Settings → **Security**, tick the SIP boxes,
-  then **Build and Install OpenCore** and reboot.
-- **Hand-edited OpenCore** (Proxmox and similar): edit `EFI/OC/config.plist` under
-  `NVRAM → Add → 7C436110-AB2A-4BBB-A880-FE41995C9F82`, then cold boot.
+  then **Build and Install OpenCore** and reboot. This works — it is how the
+  machine this was tested on is configured.
+- **Hand-edited OpenCore** (Proxmox and similar): set `csr-active-config` under
+  `NVRAM → Add → 7C436110-AB2A-4BBB-A880-FE41995C9F82` in `EFI/OC/config.plist`.
+  The mechanics — mounting the EFI, editing with PlistBuddy, validating before
+  you reboot on it — are the same as for AMFI, written out in full under
+  *"OCLP's 'Disable AMFI' is ticked but AMFI still isn't disabled"* below. The
+  only difference is the variable name.
+
+**Note the asymmetry:** OCLP's GUI handles SIP reliably. It is *AMFI* where the
+checkbox often produces no boot argument, which is a separate problem with its
+own entry below. Getting `csrutil status` right does not mean AMFI is off —
+check both.
 
 ### In OCLP, which SIP boxes do I tick?
 
@@ -39,35 +49,92 @@ If you prefer the minimum: whatever your machine is booted with now, plus
 
 ### OCLP's "Disable AMFI" is ticked but AMFI still isn't disabled
 
-Known: on some versions that checkbox doesn't produce a boot argument. Check what
-is actually in effect:
+On some versions that checkbox doesn't produce a boot argument, and setting one
+by hand doesn't stick either — OpenCore rewrites NVRAM on every boot. Work
+through it in this order.
+
+**1. Find out what is actually in effect.**
 
 ```bash
 sysctl kern.bootargs      # what the kernel booted with — authoritative
 nvram boot-args           # what is stored — may differ
 ```
 
-If `amfi_get_out_of_my_way` is missing, set it yourself, preserving the arguments
-already there:
+If `amfi_get_out_of_my_way` is missing from the first one, the checkbox didn't
+take. On a working OCLP machine it sits alongside OCLP's own arguments:
+
+```
+keepsyms=1 debug=0x100 -lilubetaall ipc_control_port_options=0 -nokcmismatchpanic amfi_get_out_of_my_way=1
+```
+
+Whatever you do next, keep the existing arguments. Replacing them can leave the
+machine unbootable without a config reset.
+
+**2. Try setting it directly.**
 
 ```bash
 sudo nvram boot-args="<existing args> amfi_get_out_of_my_way=1"
 ```
 
-then reboot. This needs `ALLOW_UNRESTRICTED_NVRAM` already set, or it fails with
-`not permitted`.
+If this fails with `(iokit/common) not permitted`, NVRAM protection is still on —
+add `ALLOW_UNRESTRICTED_NVRAM` to your SIP configuration and reboot first.
 
-### `sudo nvram` fails with `(iokit/common) not permitted`
+**3. If it reverts after a reboot, OpenCore is overwriting it.**
 
-NVRAM protection is still on. Add `ALLOW_UNRESTRICTED_NVRAM` to your SIP
-configuration and reboot first.
+This is the step most people get stuck on. Values under `NVRAM → Add` are
+**only written if the variable does not already exist**, so adding `boot-args`
+there does nothing when OpenCore already sets it. To change an existing value it
+must *also* be listed under `NVRAM → Delete`.
 
-### I set `boot-args` and after a reboot they're gone
+Set it in the OpenCore configuration rather than with `nvram`. Either use the
+OCLP **Advanced** tab, or edit `config.plist` directly — the sequence below is
+what worked on a bare-metal OCLP machine.
 
-OpenCore is managing them. Values under `NVRAM → Add` are **only written if the
-variable does not already exist** — to change an existing one it must also be
-listed under `NVRAM → Delete`. Set the argument in your OpenCore config (or the
-OCLP Advanced tab) rather than with `nvram`.
+Mount the EFI partition and check what OpenCore is currently setting:
+
+```bash
+sudo diskutil mount disk0s1
+
+/usr/libexec/PlistBuddy -c \
+  "Print :NVRAM:Add:7C436110-AB2A-4BBB-A880-FE41995C9F82:boot-args" \
+  /Volumes/EFI/EFI/OC/config.plist
+```
+
+Back it up, then set the value — **including everything already there**, with
+`amfi_get_out_of_my_way=1` appended:
+
+```bash
+sudo cp /Volumes/EFI/EFI/OC/config.plist /Volumes/EFI/EFI/OC/config.plist.bak
+
+sudo /usr/libexec/PlistBuddy -c \
+  "Set :NVRAM:Add:7C436110-AB2A-4BBB-A880-FE41995C9F82:boot-args \
+   keepsyms=1 debug=0x100 -lilubetaall ipc_control_port_options=0 \
+   -nokcmismatchpanic amfi_get_out_of_my_way=1" \
+  /Volumes/EFI/EFI/OC/config.plist
+```
+
+Verify the file is still valid before you reboot on it — a malformed
+`config.plist` will not boot:
+
+```bash
+plutil -lint /Volumes/EFI/EFI/OC/config.plist
+sudo diskutil unmount disk0s1
+```
+
+Restart, then confirm what the kernel actually booted with:
+
+```bash
+sysctl kern.bootargs
+```
+
+A normal restart is enough on bare metal. In a VM you may need a cold boot, and
+the EFI disk is mounted from the hypervisor host rather than from inside macOS.
+
+If the argument still isn't in effect, OpenCore is skipping the write because
+`boot-args` already exists in NVRAM — entries under `Add` are only applied when
+the variable is absent. Check whether `boot-args` is listed under
+`:NVRAM:Delete` for the same GUID, and add it there so the old value is cleared
+before the new one is written.
 
 ### Should I re-enable SIP afterwards?
 
