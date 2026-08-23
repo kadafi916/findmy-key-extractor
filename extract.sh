@@ -64,7 +64,37 @@ have_deps() {
     [ -n "$PYTHON" ] && "$PYTHON" -c "import Crypto, cryptography" 2>/dev/null
 }
 
-if [ "${1:-}" = "--setup" ]; then
+# ── Arguments ─────────────────────────────────────────────────────────────
+DO_SETUP=0
+ARG_WAIT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --setup) DO_SETUP=1; shift ;;
+        --wait)  ARG_WAIT="${2:-}"; shift 2 ;;
+        --wait=*) ARG_WAIT="${1#*=}"; shift ;;
+        -h|--help)
+            echo "usage: ./extract.sh [--setup] [--wait SECONDS]"
+            echo "  --setup         create .venv and install the verification deps"
+            echo "  --wait SECONDS  how long to wait for Find My to read each key"
+            echo "                  (default 180; slow or virtualised machines need more)"
+            exit 0 ;;
+        *) echo "unknown option: $1 — try --help" >&2; exit 2 ;;
+    esac
+done
+if ! [ "${ARG_WAIT:-180}" -gt 0 ] 2>/dev/null; then
+    echo "--wait needs a positive number of seconds" >&2; exit 2
+fi
+
+# How long to wait for Find My to read each keychain item. 45s was the original
+# budget and is too short on slow or virtualised hardware: the two items are read
+# at different moments, so a short wait can capture FMF and miss FMIP entirely —
+# observed on a 2014 Mac mini, reported independently from a Proxmox VM.
+# Assigned here, before anything prints it. FINDMY_WAIT_SECONDS still works.
+WAIT_SECONDS="${FINDMY_WAIT_SECONDS:-180}"
+[ -n "${ARG_WAIT:-}" ] && WAIT_SECONDS="$ARG_WAIT"
+ELAPSED=0
+
+if [ "$DO_SETUP" = "1" ]; then
     echo ""
     echo "  🔧  Setting up the verification dependencies"
     echo ""
@@ -121,7 +151,8 @@ echo ""
 echo "  🔑  Find My Key Extractor"
 echo "  ─────────────────────────"
 echo ""
-echo "  ⏳  Extracting keys (~10s)..."
+echo "  ⏳  Waiting for Find My to read its keys (up to ${WAIT_SECONDS}s)..."
+echo ""
 
 # ── Pre-kill stale lldb instances and FindMy.app (NOT findmylocateagent yet —
 #    we need lldb to be in --wait-for state BEFORE we kill it, otherwise
@@ -168,11 +199,6 @@ sleep 1
 open /System/Applications/FindMy.app
 
 # ── Wait for keys (scripts kill targets when done) ────────────────────────
-# 45s was the original budget and is too short on slow or virtualised hardware:
-# Find My reads the two keychain items at different moments, so a short wait can
-# capture FMF and miss FMIP entirely — observed on a 2014 Mac mini, and reported
-# independently from a Proxmox VM. Override with FINDMY_WAIT_SECONDS if needed.
-WAIT_SECONDS="${FINDMY_WAIT_SECONDS:-180}"
 for _ in $(seq 1 "$WAIT_SECONDS"); do
     # Copy any FMF/FMIP bplists out of FindMy's sandbox container as soon
     # as they show up (extract_keychain_keys.py can't write $KEYS_DIR
@@ -185,13 +211,26 @@ for _ in $(seq 1 "$WAIT_SECONDS"); do
         fi
     done
 
+    ELAPSED=$((ELAPSED + 1))
     got=0
+    M_LS="·"; M_FMF="·"; M_FMIP="·"
     if [ -f "$KEYS_DIR/LocalStorage.key" ] || [ -f "$KEYS_DIR/LocalStorage.key.candidate" ]; then
-        got=$((got+1))
+        got=$((got+1)); M_LS="✅"
     fi
-    [ -f "$KEYS_DIR/FMFDataManager.bplist" ] && got=$((got+1))
-    [ -f "$KEYS_DIR/FMIPDataManager.bplist" ] && got=$((got+1))
+    [ -f "$KEYS_DIR/FMFDataManager.bplist" ]  && { got=$((got+1)); M_FMF="✅"; }
+    [ -f "$KEYS_DIR/FMIPDataManager.bplist" ] && { got=$((got+1)); M_FMIP="✅"; }
+
+    # Live progress: a 3-minute wait with no output looks like a hang. Update in
+    # place on a terminal; print a periodic line when redirected to a file.
+    STATUS="LocalStorage $M_LS   FMF $M_FMF   FMIP $M_FMIP"
+    if [ -t 1 ]; then
+        printf '\r      %3ds  %s ' "$ELAPSED" "$STATUS"
+    elif [ $((ELAPSED % 30)) -eq 0 ]; then
+        echo "      ${ELAPSED}s  $STATUS"
+    fi
+
     if [ "$got" -ge 3 ]; then
+        [ -t 1 ] && printf '\r\033[2K' 
         break
     fi
     # Also done if both lldb sessions exited
@@ -201,9 +240,20 @@ for _ in $(seq 1 "$WAIT_SECONDS"); do
     sleep 1
 done
 
+[ -t 1 ] && printf '\r\033[2K' 
+
+# Drop the lldb sessions from the job table before killing them. Otherwise bash
+# announces the reap itself — "line N: 1234 Killed: 9  sudo lldb --wait-for …" —
+# which looks like an error to the user and is nothing of the kind. `wait` can't
+# be used on a disowned job, so poll for exit instead.
+disown "$PID1" "$PID2" 2>/dev/null || true
 sudo kill -9 "$PID1" "$PID2" 2>/dev/null || true
-wait "$PID1" 2>/dev/null || true
-wait "$PID2" 2>/dev/null || true
+for _ in $(seq 1 15); do
+    if ! kill -0 "$PID1" 2>/dev/null && ! kill -0 "$PID2" 2>/dev/null; then
+        break
+    fi
+    sleep 0.2
+done
 
 # One last copy pass in case a bplist landed in the sandbox tmp dir right
 # as the loop above exited.
@@ -284,7 +334,7 @@ if [ "$FAIL" -ne 0 ]; then
         echo "  No errors in the lldb logs — the run most likely ended before"
         echo "  Find My read every key. Waited ${WAIT_SECONDS}s."
         echo ""
-        echo "  Try a longer wait:   FINDMY_WAIT_SECONDS=300 ./extract.sh"
+        echo "  Try a longer wait:   ./extract.sh --wait 300"
     fi
 fi
 
