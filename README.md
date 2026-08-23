@@ -248,16 +248,48 @@ It then calls `sqlite3_db_filename(db, "main")` to identify which database this 
 
 #### FMF/FMIP keys — `SecItemCopyMatching`
 
-`FindMy.app` reads keychain items via `SecItemCopyMatching(query, &result)`. The lldb script uses a two-phase approach:
+`FindMy.app` reads keychain items via `SecItemCopyMatching(query, &result)`. The
+lldb script uses a two-phase approach:
 
-1. **Entry breakpoint**: Records the result pointer (arg 1) and return address (stripped of PAC bits on ARM64)
-2. **Return breakpoint**: One-shot breakpoint at the return address. Checks return value == 0 (success), then reads the result `NSDictionary`
+1. **Entry breakpoint**: reads `svce` from the query dictionary to identify which
+   item is being fetched, and records the result pointer (arg 1) and the return
+   address (stripped of PAC bits on ARM64).
+2. **Return breakpoint**: armed with a **condition** — a C/ObjC expression, built
+   for this specific call, that performs the entire capture and then evaluates to
+   `0` so the breakpoint never actually stops.
 
-From the dictionary, it extracts:
-- `svce` — service name (e.g., `"FMIPDataManager"`) → used as output filename
-- `v_Data` — raw keychain value data → saved as `{svce}.bplist`
+The condition dereferences the result pointer, walks the `NSDictionary` to
+`v_Data` (the raw keychain value), and writes those bytes to a file named after
+`svce`.
 
-After capturing 2 items (FMF + FMIP), the process is killed.
+#### Why a condition, and why it writes inside the app
+
+The capture runs as a condition rather than as a Python callback because on
+lldb 1700 (Xcode 16) installing a Python breakpoint callback from *inside* another
+one fails with `KeyError: lldb_autogen_python_bp_callback_func__N`. Conditions are
+evaluated by lldb's own expression evaluator with no Python involved, so they
+sidestep it entirely.
+
+Because the condition executes inside `FindMy.app`, it runs under that process's
+**App Sandbox**. A plain `open()` to an arbitrary path silently fails there — SIP
+and AMFI being relaxed lets us attach and set breakpoints, but the sandbox is a
+separate per-process kernel policy that injected code still runs under. So the
+condition writes to `NSTemporaryDirectory()`, which resolves to the app's own
+writable container:
+
+```
+~/Library/Containers/com.apple.findmy/Data/tmp/
+```
+
+`extract.sh` polls that directory and copies each `.bplist` out to `./keys/` as
+it appears, running as the normal unsandboxed user. Once both keys are out, the
+process is killed.
+
+One consequence worth knowing if you are modifying this: **a condition that
+errors counts as a stop**, which ends the batch-mode lldb session and loses any
+key not yet captured. The condition therefore builds its output path first and
+returns early once that file exists, so after a successful capture it dereferences
+nothing.
 
 ### Encryption Schemes
 
