@@ -18,6 +18,8 @@ Used by [FindMySyncPlus](https://github.com/manonstreet/FindMySyncPlus) to decry
 ## Prerequisites
 
 - macOS (Apple Silicon and Intel x86_64)
+  - Verified on macOS 15.7.2 (Intel, lldb-1700) and macOS 26.5.2
+    (Apple Silicon, lldb-1703)
 - Xcode Command Line Tools — `xcode-select --install` (provides lldb)
 - Python 3 + pip
 - Find My app installed and signed into iCloud
@@ -79,13 +81,27 @@ A virtualenv rather than a plain `pip3 install` because it works whichever
 `python3` you have — Apple's permits a direct install, Homebrew's refuses it
 (`externally-managed-environment`).
 
-No interaction needed. The script launches two parallel lldb sessions, restarts the Find My processes to trigger key loading, captures the keys, and verifies each one:
+Apart from the password prompt there's no interaction. The script launches two
+parallel lldb sessions, restarts the Find My processes to trigger key loading,
+captures the keys, and verifies each one. A typical run takes 25–40 seconds; it
+waits up to 180 for Find My to ask for its keys, and retries if it doesn't:
 
 ```
   🔑  Find My Key Extractor
   ─────────────────────────
 
-  ⏳  Extracting keys (~10s)...
+  Administrator access is required. macOS will prompt for your login
+  password next — that prompt comes from macOS, not from this script,
+  and the password is never stored or sent anywhere.
+
+  It is used for:
+    • lldb          attach to the Find My app to read its keys
+    • pkill         restart Find My so it re-reads them
+    • chown         make the captured key files readable by you
+
+Password:
+
+  ⏳  Waiting for Find My to read its keys (up to 180s)...
 
   ── Extraction ──
 
@@ -106,16 +122,37 @@ Keys are saved to `./keys/` (re-running overwrites existing files with identical
 
 ### Step 3: Re-enable Security
 
-Boot into macOS Recovery and run:
+Reverse the change wherever you made it in Step 1.
+
+**On a stock Mac** — boot into macOS Recovery and run:
 
 ```bash
 nvram -d boot-args
 csrutil enable
 ```
 
-Reboot. Your Mac is back to its normal security posture. The extracted keys continue to work.
+**On an OpenCore machine (OCLP, or a VM booted via OpenCore)** — do it in
+OpenCore, not Recovery. OpenCore rewrites both values from its own `config.plist`
+on every boot, so a change made in Recovery is silently reverted and you will
+believe SIP is back on when it is not. Untick the SIP boxes in
+OpenCore-Patcher → Settings → **Security** and rebuild, or remove
+`amfi_get_out_of_my_way=1` from `boot-args` and restore `csr-active-config` in
+`config.plist`.
+
+Reboot, then confirm both actually took:
+
+```bash
+csrutil status          # should no longer say "disabled"
+sysctl kern.bootargs    # should no longer contain amfi_get_out_of_my_way
+```
+
+The extracted keys continue to work — they are just files in `keys/`.
 
 ## Troubleshooting
+
+**If something fails, run `./diagnose.sh` first.** It reports SIP and AMFI state,
+your lldb version, and where the Find My files are, then names whatever is
+blocking extraction. It is also the output to attach to a bug report.
 
 Longer answers to recurring questions — SIP on OpenCore/OCLP machines, AMFI boot
 arguments, partial key capture, where `LocalStorage.db` lives — are in [FAQ.md](FAQ.md).
@@ -125,8 +162,6 @@ arguments, partial key capture, where `LocalStorage.db` lives — are in [FAQ.md
 |---------|-----|
 | `error: attach failed` | SIP/AMFI not fully disabled. Try `csrutil disable` (full) in Recovery. |
 | Extraction hangs | Find My may not have launched. Check if it's running: `pgrep -x FindMy`. |
-| `findmylocateagent` not found | Open Find My at least once — the agent only starts after first launch. |
-| Key verification fails | Find My cache may be stale. Open Find My, wait for it to refresh, re-run. |
 | `pip3: command not found` | Install Python 3: `brew install python3` or use `python3 -m pip`. |
 | `error: externally-managed-environment` | Your `python3` is PEP 668-managed (Homebrew's unversioned `python`, pyenv, …). Run `./extract.sh --setup` rather than `--break-system-packages`. |
 | `ModuleNotFoundError: No module named 'Crypto'` | Dependencies missing for the interpreter in use. Run `./extract.sh --setup`; the script also checks this before extracting. |
@@ -141,6 +176,8 @@ arguments, partial key capture, where `LocalStorage.db` lives — are in [FAQ.md
 | `verify_key.py` | Standalone key verifier — trial decryption |
 | `decrypt_localstorage.py` | Optional CLI decryptor for LocalStorage.db |
 | `requirements.txt` | Python dependencies |
+| `diagnose.sh` | Environment report — run this first when something fails |
+| `FAQ.md` | Setup problems, partial captures, where the data lives |
 
 The commands below call `python3` directly, unlike `extract.sh` — use
 `.venv/bin/python3` in place of `python3`, or activate the virtualenv first.
@@ -188,7 +225,7 @@ extract.sh
   └── wait + verify
 ```
 
-Both sessions run in the background. After Find My launches, both processes start and hit their breakpoints within seconds. Total runtime is ~10s.
+Both sessions run in the background. After Find My launches, both processes start and hit their breakpoints within seconds. A typical run takes 25–40 seconds end to end, most of it waiting for Find My to ask for its keys.
 
 #### LocalStorage.key — `sqlite3_key_v2`
 
